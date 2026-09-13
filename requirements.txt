@@ -1,0 +1,8 @@
+ddgs
+langchain
+langchain-openrouter
+langgraph
+pydantic>=2
+python-dotenv
+requests
+pypdf

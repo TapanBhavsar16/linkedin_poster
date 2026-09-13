@@ -1,4 +1,7 @@
 import logging
+import os
+from pathlib import Path
+from logging.handlers import RotatingFileHandler
 
 LOGGER_NAME = "linkedin_poster"
 
@@ -36,14 +39,30 @@ class LevelFormatter(logging.Formatter):
 
 
 def configure_logging(level: int = logging.INFO) -> logging.Logger:
-    """Configure and return the application logger without touching root logging."""
+    """Configure console and persistent application logging."""
     logger = logging.getLogger(LOGGER_NAME)
     logger.setLevel(level)
     logger.propagate = False
 
-    if not logger.handlers:
+    formatter = LevelFormatter()
+    if not any(getattr(handler, "_linkedin_console", False) for handler in logger.handlers):
         handler = logging.StreamHandler()
-        handler.setFormatter(LevelFormatter())
+        handler._linkedin_console = True
+        handler.setFormatter(formatter)
+        logger.addHandler(handler)
+
+    log_dir = Path(os.getenv("LOG_DIR", "logs"))
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_path = log_dir / "linkedin_poster.log"
+    if not any(getattr(handler, "_linkedin_file", False) for handler in logger.handlers):
+        handler = RotatingFileHandler(
+            log_path,
+            maxBytes=5_000_000,
+            backupCount=3,
+            encoding="utf-8",
+        )
+        handler._linkedin_file = True
+        handler.setFormatter(formatter)
         logger.addHandler(handler)
 
     return logger
