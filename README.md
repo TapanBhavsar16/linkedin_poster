@@ -75,3 +75,23 @@ to the selector so the agent avoids repeating them. Set
 You can use a specific free model instead of `openrouter/free` by setting
 `OPENROUTER_MODEL` to a model slug with the `:free` variant. Free models may
 have lower rate limits and availability than paid models.
+
+## Schedule a daily run
+
+The scheduler runs the existing topic-agent workflow once at 10:00 in the
+machine's local timezone. Set `DAILY_QUERY` in `.env` to choose the daily
+research query. Publishing remains disabled unless `LINKEDIN_PUBLISH=true`.
+
+To install the cron entry for the current user:
+
+```bash
+./scripts/install_cron.sh
+```
+
+The cron job runs `scripts/run_daily.sh`, writes its output to
+`logs/cron.log`, and invokes `scheduler.py --once`. To run the same job
+immediately for a smoke test:
+
+```bash
+./scripts/run_daily.sh
+```
