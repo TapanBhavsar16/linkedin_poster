@@ -11,9 +11,10 @@ logger = logging.getLogger(__name__)
 
 
 class Paper(BaseModel):
-    """Schema returned to the LangChain/LangGraph tool."""
+    """Structured paper metadata returned by each search provider."""
     title: str
     url: HttpUrl
+    pdf_url: HttpUrl | None = None
     date: datetime | None = None
     summary: str | None = None
 
@@ -128,12 +129,23 @@ class HuggingFaceSearchTool:
         published = cls._parse_date(cls._value(item, "publishedAt"))
         submitted = cls._parse_date(cls._value(item, "submittedOnDailyAt"))
         summary = cls._value(item, "summary") or cls._value(item, "ai_summary")
+        pdf_url = cls._value(item, "pdfUrl", "pdf_url")
+        if not pdf_url:
+            pdf_url = cls._arxiv_pdf_url(str(paper_id))
         return Paper(
             title=str(cls._value(item, "title") or paper_id).strip(),
             url=f"https://huggingface.co/papers/{paper_id}",
+            pdf_url=pdf_url,
             date=published or submitted,
             summary=str(summary).strip() if summary else None,
         )
+
+    @staticmethod
+    def _arxiv_pdf_url(paper_id: str) -> str | None:
+        """Build an arXiv PDF URL when a Hugging Face ID is an arXiv ID."""
+        if re.fullmatch(r"\d{4}\.\d{4,5}(v\d+)?", paper_id):
+            return f"https://arxiv.org/pdf/{paper_id}.pdf"
+        return None
 
     @staticmethod
     def _value(item: dict, key: str, nested_key: str | None = None) -> Any:
@@ -193,7 +205,12 @@ class ArxivSearchTool:
                     date = datetime.fromisoformat(m.group(1))
                 except ValueError:
                     pass
-            papers.append(Paper(title=title, url=url, date=date, summary=body))
+            pdf_url = url
+            if "/abs/" in pdf_url:
+                pdf_url = pdf_url.replace("/abs/", "/pdf/") + ".pdf"
+            papers.append(
+                Paper(title=title, url=url, pdf_url=pdf_url, date=date, summary=body)
+            )
         return papers
 
 
@@ -257,16 +274,40 @@ class OpenAlexSearchTool:
                     logger.warning("Invalid OpenAlex publication date: %r", publication_date)
 
             abstract = self._reconstruct_abstract(item.get("abstract_inverted_index"))
+            pdf_url = self._pdf_url(item)
 
             papers.append(
                 Paper(
                     title=title,
                     url=url,
+                    pdf_url=pdf_url,
                     date=date,
                     summary=abstract,
                 )
             )
         return papers[:limit]
+
+    @staticmethod
+    def _pdf_url(work: dict) -> str | None:
+        """Return a direct PDF URL from the OpenAlex work locations.
+
+        ``open_access.oa_url`` is often a landing page, so it must not be
+        returned as though it were a PDF.
+        """
+        locations = [
+            work.get("best_oa_location"),
+            work.get("primary_location"),
+            *(work.get("locations") or []),
+        ]
+        for location in locations:
+            if not isinstance(location, dict):
+                continue
+            # ``url_for_pdf`` is used by some older OpenAlex/Unpaywall-shaped
+            # records; current OpenAlex records use ``pdf_url``.
+            pdf_url = location.get("pdf_url") or location.get("url_for_pdf")
+            if isinstance(pdf_url, str) and pdf_url.strip():
+                return pdf_url.strip()
+        return None
 
     @staticmethod
     def _reconstruct_abstract(inverted_index: object) -> str | None:

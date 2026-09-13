@@ -16,6 +16,8 @@ def _print_papers(source: str, papers: list[Paper]) -> None:
     for index, paper in enumerate(papers, start=1):
         print(f"{index}. {paper.title}")
         print(f"   {paper.url}")
+        if paper.pdf_url:
+            print(f"   PDF: {paper.pdf_url}")
         if paper.summary:
             print(f"   {paper.summary[:240]}{'...' if len(paper.summary) > 240 else ''}")
 
