@@ -196,6 +196,15 @@ class ArxivSearchTool:
             title = item.get("title", "")
             url = item.get("href", "")
             body = item.get("body", "")
+            # Search engines sometimes return arXiv category/listing pages.
+            # They are not papers and must not be treated as PDF sources.
+            if not re.search(
+                r"arxiv\.org/(?:abs|pdf)/(?:\d{4}\.\d{4,5}(?:v\d+)?|[a-z-]+/\d{7})(?:\.pdf)?(?:[/?#]|$)",
+                url,
+                re.IGNORECASE,
+            ):
+                logger.debug("Skipping non-paper arXiv result: %s", url)
+                continue
             # Attempt to extract a date from body (heuristic)
             date = None
             # Simple heuristic: look for a date pattern in body
@@ -207,7 +216,9 @@ class ArxivSearchTool:
                     pass
             pdf_url = url
             if "/abs/" in pdf_url:
-                pdf_url = pdf_url.replace("/abs/", "/pdf/") + ".pdf"
+                pdf_url = pdf_url.replace("/abs/", "/pdf/")
+            if "/pdf/" in pdf_url and not pdf_url.lower().endswith(".pdf"):
+                pdf_url = f"{pdf_url}.pdf"
             papers.append(
                 Paper(title=title, url=url, pdf_url=pdf_url, date=date, summary=body)
             )

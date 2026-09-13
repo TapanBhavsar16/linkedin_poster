@@ -10,6 +10,7 @@ from typing import Any, TypedDict
 from pydantic import BaseModel, Field
 import requests
 from logger import configure_logging
+from src.poster import publish_post_plan as publish_linkedin_post
 
 from src.research_tools import (
     ArxivSearchTool,
@@ -57,6 +58,7 @@ class TopicAgentState(TypedDict, total=False):
     papers: list[dict[str, Any]]
     topic: TopicDecision
     post_plan: LinkedInPostPlan
+    publication: dict[str, str | None]
     errors: list[str]
 
 
@@ -196,10 +198,13 @@ the primary paper does not support.
 The full_post must be ready to paste into LinkedIn: use a strong but accurate
 opening, short readable paragraphs, line breaks, plain language, a concrete
 practitioner takeaway, a question or invitation to discuss, and 3-8 relevant
-hashtags. Include a compact "Source:" line with the primary paper title and
-URL. Do not mention this prompt, extraction, or missing information. Avoid
-hype, unsupported statistics, fabricated citations, and claims not present in
-the research.
+hashtags. Use the supplied research as internal background only. Do not
+disclose or identify the source in full_post: do not include a source line,
+paper title, author names, journal or venue name, DOI, URL, hyperlink, citation,
+footnote, bracketed reference, or phrases such as "according to this paper".
+Do not mention this prompt, extraction, or missing information. Avoid hype,
+unsupported statistics, fabricated citations, and claims not present in the
+research.
 
 SELECTED TOPIC:
 {topic.model_dump_json(indent=2)}
@@ -231,6 +236,33 @@ PDF URL: {selected_paper.get('pdf_url') or 'Not available'}
     return output
 
 
+def publish_post(state: TopicAgentState) -> dict[str, Any]:
+    """Publish the generated post when LinkedIn publishing is enabled."""
+    enabled = os.getenv("LINKEDIN_PUBLISH", "false").strip().lower() in {
+        "1", "true", "yes", "on"
+    }
+    if not enabled:
+        logger.info("STEP publish_post.skipped reason=LINKEDIN_PUBLISH_not_enabled")
+        return {
+            "publication": {
+                "status": "skipped",
+                "post_id": None,
+                "message": "Set LINKEDIN_PUBLISH=true to publish this post",
+            }
+        }
+
+    if not state.get("post_plan"):
+        raise RuntimeError("Cannot publish because no post plan was generated")
+
+    headless = os.getenv("LINKEDIN_HEADLESS", "false").strip().lower() in {
+        "1", "true", "yes", "on"
+    }
+    logger.info("STEP publish_post.start headless=%s", headless)
+    result = publish_linkedin_post(state["post_plan"], headless=headless)
+    logger.info("STEP publish_post.done post_id=%r", result.get("post_id"))
+    return {"publication": result}
+
+
 def _download_pdf_text(pdf_url: object) -> tuple[str | None, str | None]:
     """Download and extract every page of a PDF, returning text and an error."""
     if not pdf_url:
@@ -245,15 +277,29 @@ def _download_pdf_text(pdf_url: object) -> tuple[str | None, str | None]:
 
     try:
         logger.info("STEP pdf.download.start url=%r", pdf_url)
-        response = requests.get(str(pdf_url), timeout=30)
+        response = requests.get(
+            str(pdf_url),
+            headers={
+                "Accept": "application/pdf,application/octet-stream;q=0.9,*/*;q=0.1",
+                "User-Agent": "linkedin-poster/1.0",
+            },
+            timeout=30,
+        )
         response.raise_for_status()
+        content = response.content
+        content_type = response.headers.get("content-type", "").split(";", 1)[0].lower()
         logger.info(
             "STEP pdf.download.done status=%d bytes=%d content_type=%r",
             response.status_code,
-            len(response.content),
+            len(content),
             response.headers.get("content-type"),
         )
-        reader = PdfReader(BytesIO(response.content))
+        if not content.startswith(b"%PDF-"):
+            if content_type == "text/html" or content.lstrip().startswith(b"<!DOCTYPE"):
+                return None, "the PDF URL returned an HTML page instead of a PDF"
+            return None, "the downloaded response is not a valid PDF"
+
+        reader = PdfReader(BytesIO(content))
         logger.info("STEP pdf.extract.start pages=%d", len(reader.pages))
         pages: list[str] = []
         for number, page in enumerate(reader.pages, start=1):
@@ -286,15 +332,28 @@ def _format_papers(papers: list[dict[str, Any]]) -> str:
 def build_topic_agent():
     """Build and compile the LangGraph topic-finalization workflow."""
     from langgraph.graph import END, START, StateGraph
+    from langgraph.types import RetryPolicy
+
+    # Retry research/LLM/PDF work, but keep LinkedIn publishing single-attempt
+    # because an acknowledged request can otherwise create duplicate posts.
+    transient_retry = RetryPolicy(
+        initial_interval=1.0,
+        backoff_factor=2.0,
+        max_interval=8.0,
+        max_attempts=3,
+        jitter=True,
+    )
 
     graph = StateGraph(TopicAgentState)
-    graph.add_node("collect_research", collect_research)
-    graph.add_node("finalize_topic", finalize_topic)
-    graph.add_node("create_post_plan", create_post_plan)
+    graph.add_node("collect_research", collect_research, retry_policy=transient_retry)
+    graph.add_node("finalize_topic", finalize_topic, retry_policy=transient_retry)
+    graph.add_node("create_post_plan", create_post_plan, retry_policy=transient_retry)
+    graph.add_node("publish_post", publish_post)
     graph.add_edge(START, "collect_research")
     graph.add_edge("collect_research", "finalize_topic")
     graph.add_edge("finalize_topic", "create_post_plan")
-    graph.add_edge("create_post_plan", END)
+    graph.add_edge("create_post_plan", "publish_post")
+    graph.add_edge("publish_post", END)
     return graph.compile()
 
 

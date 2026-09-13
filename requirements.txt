@@ -6,3 +6,4 @@ pydantic>=2
 python-dotenv
 requests
 pypdf
+playwright

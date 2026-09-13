@@ -31,6 +31,7 @@ def main() -> None:
     output = {
         "topic": result.get("topic").model_dump(mode="json") if result.get("topic") else None,
         "post_plan": result.get("post_plan").model_dump(mode="json") if result.get("post_plan") else None,
+        "publication": result.get("publication"),
         "source_errors": result.get("errors", []),
     }
     logger.info("STEP cli.serialization.done output_chars=%d", len(json.dumps(output, ensure_ascii=False)))
