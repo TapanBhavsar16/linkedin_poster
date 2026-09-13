@@ -12,6 +12,12 @@ source .venv/bin/activate
 python main.py "large language models" --limit 3
 ```
 
+To run the topic-selection agent from the same entry point:
+
+```bash
+python main.py --agent "generative AI agents"
+```
+
 The query is optional. This also works:
 
 ```bash
@@ -39,7 +45,7 @@ Install the dependencies and set your OpenRouter key in the project root:
 python -m pip install -r requirements.txt
 export OPENROUTER_API_KEY="your-openrouter-key"
 export OPENROUTER_MODEL="openrouter/free"
-python agent_cli.py "generative AI agents"
+python main.py --agent "generative AI agents"
 ```
 
 The agent uses LangGraph to collect recent papers from arXiv, Hugging Face, and
@@ -60,6 +66,11 @@ to rely only on the available metadata.
 Diagnostic logs are written to `logs/linkedin_poster.log` with up to three
 rotated 5 MB backups. They record each workflow step, provider result, selected
 paper, PDF status, prompt/PDF sizes, model output type, and final state keys.
+
+Successfully published topics are stored in `data/posted_topics.json`. Entries
+older than seven days are removed automatically, and recent topics are supplied
+to the selector so the agent avoids repeating them. Set
+`POSTED_TOPICS_MEMORY_FILE` to use a different memory file.
 
 You can use a specific free model instead of `openrouter/free` by setting
 `OPENROUTER_MODEL` to a model slug with the `:free` variant. Free models may

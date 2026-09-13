@@ -11,6 +11,7 @@ from pydantic import BaseModel, Field
 import requests
 from logger import configure_logging
 from src.poster import publish_post_plan as publish_linkedin_post
+from src.topic_memory import TopicMemory
 
 from src.research_tools import (
     ArxivSearchTool,
@@ -132,6 +133,9 @@ def finalize_topic(state: TopicAgentState) -> dict[str, Any]:
         raise RuntimeError("No papers were found; cannot finalize a topic")
 
     model = _model().with_structured_output(TopicDecision)
+    recent_topics = TopicMemory().recent()
+    recent_topic_text = "\n".join(f"- {item['topic']}" for item in recent_topics)
+    exclusion = recent_topic_text or "- None"
     prompt = """You are a research editor choosing one topic for a professional LinkedIn post.
 
 Use only the supplied paper records. Identify a specific topic with strong recent
@@ -143,7 +147,12 @@ clickbait. Mention uncertainty when the evidence is thin.
 Return one focused topic, scores from 0 to 100, the shared conclusion, evidence,
 and a practical LinkedIn angle. Also select the single strongest source paper by
 returning its 1-based index from the supplied PAPER RECORDS. Do not invent
-findings or citations.
+findings or citations. The topic must be meaningfully different from every topic
+in the RECENTLY POSTED TOPICS list. Do not merely change the wording or angle of
+an existing topic; choose a different underlying subject.
+
+RECENTLY POSTED TOPICS (last 7 days):
+""" + exclusion + """
 
 PAPER RECORDS:
 """
@@ -254,11 +263,27 @@ def publish_post(state: TopicAgentState) -> dict[str, Any]:
     if not state.get("post_plan"):
         raise RuntimeError("Cannot publish because no post plan was generated")
 
+    topic = state.get("topic")
+    topic_text = str(getattr(topic, "topic", "")).strip()
+    memory = TopicMemory()
+    if memory.contains(topic_text):
+        logger.warning("STEP publish_post.blocked reason=duplicate_topic topic=%r", topic_text)
+        return {
+            "publication": {
+                "status": "skipped",
+                "post_id": None,
+                "message": "A topic with this subject was posted within the last 7 days",
+            }
+        }
+
     headless = os.getenv("LINKEDIN_HEADLESS", "false").strip().lower() in {
         "1", "true", "yes", "on"
     }
     logger.info("STEP publish_post.start headless=%s", headless)
     result = publish_linkedin_post(state["post_plan"], headless=headless)
+    if result.get("status") == "success":
+        memory.record(topic_text, result.get("post_id"))
+        logger.info("STEP publish_post.memory_recorded topic=%r", topic_text)
     logger.info("STEP publish_post.done post_id=%r", result.get("post_id"))
     return {"publication": result}
 
