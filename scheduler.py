@@ -26,11 +26,20 @@ def run_daily_job(query: str) -> None:
     # LangGraph/LangChain stack until a job is actually executed.
     from src.agent import run_topic_agent
 
+    started_at = time.perf_counter()
     log.info("STEP scheduler.job.start query=%r", query)
-    result = run_topic_agent(query)
+    try:
+        result = run_topic_agent(query)
+    except Exception:
+        log.exception(
+            "STEP scheduler.job.error elapsed_seconds=%.2f query=%r",
+            time.perf_counter() - started_at, query,
+        )
+        raise
     publication = result.get("publication") or {}
     log.info(
-        "STEP scheduler.job.done topic=%r publication_status=%r errors=%d",
+        "STEP scheduler.job.done elapsed_seconds=%.2f topic=%r publication_status=%r errors=%d",
+        time.perf_counter() - started_at,
         getattr(result.get("topic"), "topic", None),
         publication.get("status"),
         len(result.get("errors", [])),

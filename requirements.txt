@@ -1,9 +1,9 @@
 ddgs
-langchain
-langchain-openrouter
+litellm
 langgraph
-pydantic>=2
+pydantic<2
 python-dotenv
 requests
 pypdf
+tiktoken
 playwright

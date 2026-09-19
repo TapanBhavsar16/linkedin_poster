@@ -58,14 +58,22 @@ OpenAlex, then uses LangChain with OpenRouter to return:
 - `full_post`, a complete post ready to paste into LinkedIn.
 
 After the topic is finalized, the agent selects its strongest source paper,
-downloads the complete PDF, extracts every page, and grounds the post plan and
-`full_post` in that full text. If the PDF is unavailable or cannot be parsed,
+downloads and extracts every PDF page, then uses LangChain map-reduce
+summarization to produce a bounded evidence brief. It first summarizes
+section-aware chunks (with token-based fallback), then recursively reduces the
+summaries until they fit in a final synthesis. This keeps post creation safe for
+papers larger than the model context window. If the PDF is unavailable, cannot
+be parsed, or cannot be summarized,
 the result includes the problem in `source_errors` and the model is instructed
 to rely only on the available metadata.
 
 Diagnostic logs are written to `logs/linkedin_poster.log` with up to three
 rotated 5 MB backups. They record each workflow step, provider result, selected
 paper, PDF status, prompt/PDF sizes, model output type, and final state keys.
+For large PDFs, the logs also record every extracted page, detected section,
+chunk, map summary, reducer batch, and their elapsed times. Text logged for
+these diagnostics is truncated to `PDF_LOG_TEXT_MAX_CHARS` (default 1000).
+Set `OPENROUTER_TIMEOUT_SECONDS` to tune the per-request provider timeout.
 
 Successfully published topics are stored in `data/posted_topics.json`. Entries
 older than seven days are removed automatically, and recent topics are supplied
