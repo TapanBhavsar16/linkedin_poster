@@ -13,6 +13,11 @@ from src.research_tools import (
 log = configure_logging()
 
 
+def _provider_enabled(name: str) -> bool:
+    """Read a provider toggle, defaulting to enabled for backward compatibility."""
+    return os.getenv(name, "true").strip().lower() in {"1", "true", "yes", "on"}
+
+
 def _print_papers(source: str, papers: list[Paper]) -> None:
     print(f"\n{source} ({len(papers)} results)")
     for index, paper in enumerate(papers, start=1):
@@ -60,6 +65,9 @@ def _run_topic_agent(query: str) -> None:
 
 
 def main(argv: list[str] | None = None) -> None:
+    from dotenv.main import load_dotenv
+
+    load_dotenv()
     parser = argparse.ArgumentParser(
         description="Search research papers or create a LinkedIn topic post plan."
     )
@@ -84,11 +92,13 @@ def main(argv: list[str] | None = None) -> None:
         return
 
     limit = args.limit or 3
-    searches = (
-        ("arXiv", lambda: ArxivSearchTool(limit).search_arxiv(args.query, limit)),
-        ("Hugging Face", lambda: HuggingFaceSearchTool(limit).search_papers(args.query, limit, days=None)),
-        ("OpenAlex", lambda: OpenAlexSearchTool(limit).search_openalex(args.query, limit)),
-    )
+    searches = []
+    if _provider_enabled("ENABLE_ARXIV"):
+        searches.append(("arXiv", lambda: ArxivSearchTool(limit).search_arxiv(args.query, limit)))
+    if _provider_enabled("ENABLE_HUGGING_FACE"):
+        searches.append(("Hugging Face", lambda: HuggingFaceSearchTool(limit).search_papers(args.query, limit, days=None)))
+    if _provider_enabled("ENABLE_OPENALEX"):
+        searches.append(("OpenAlex", lambda: OpenAlexSearchTool(limit).search_openalex(args.query, limit)))
 
     for source, search in searches:
         log.info("Searching %s for: %s", source, args.query)

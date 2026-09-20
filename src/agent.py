@@ -74,17 +74,30 @@ def _paper_dict(paper: Paper) -> dict[str, Any]:
     return paper.model_dump(mode="json")
 
 
+def _provider_enabled(name: str) -> bool:
+    """Read a provider toggle, defaulting to enabled for backward compatibility."""
+    return os.getenv(name, "true").strip().lower() in {"1", "true", "yes", "on"}
+
+
 def _search_papers(query: str, limit: int) -> tuple[list[Paper], list[str]]:
     """Collect papers while allowing one unavailable provider to fail softly."""
     logger.info("STEP search.start query=%r limit=%d", query, limit)
-    searches = (
-        ("arXiv", lambda: ArxivSearchTool(limit).search_arxiv(query, limit)),
-        (
+    searches = []
+    if _provider_enabled("ENABLE_ARXIV"):
+        searches.append(("arXiv", lambda: ArxivSearchTool(limit).search_arxiv(query, limit)))
+    else:
+        logger.info("STEP search.provider.disabled provider=arXiv")
+    if _provider_enabled("ENABLE_HUGGING_FACE"):
+        searches.append((
             "Hugging Face",
             lambda: HuggingFaceSearchTool(limit).search_papers(query, limit, days=30),
-        ),
-        ("OpenAlex", lambda: OpenAlexSearchTool(limit).search_openalex(query, limit)),
-    )
+        ))
+    else:
+        logger.info("STEP search.provider.disabled provider=Hugging Face")
+    if _provider_enabled("ENABLE_OPENALEX"):
+        searches.append(("OpenAlex", lambda: OpenAlexSearchTool(limit).search_openalex(query, limit)))
+    else:
+        logger.info("STEP search.provider.disabled provider=OpenAlex")
     papers: list[Paper] = []
     errors: list[str] = []
     seen: set[str] = set()
@@ -262,6 +275,63 @@ def _extract_json(text: str) -> str:
     return text.strip()
 
 
+def _parse_model_json(content: Any, model_type: type[BaseModel]) -> BaseModel:
+    """Parse a model response as JSON, repairing only the common apostrophe typo."""
+    raw = _extract_json(_message_text(content))
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError:
+        # Models sometimes emit Python-style ``\'`` inside JSON strings. That
+        # escape is invalid JSON, while the apostrophe itself is valid data.
+        repaired = raw.replace("\\'", "'")
+        if repaired == raw:
+            raise
+        payload = json.loads(repaired)
+    return model_type.model_validate(payload)
+
+
+def _completion_with_json_retry(
+    *, model: str, messages: list[dict[str, str]], model_type: type[BaseModel], stage: str
+) -> BaseModel:
+    """Request structured JSON and retry once with an explicit correction prompt."""
+    response_format = {"type": "json_object"}
+    response = litellm.completion(
+        model=model,
+        messages=messages,
+        response_format=response_format,
+    )
+    content = response.choices[0].message.content
+    try:
+        return _parse_model_json(content, model_type)
+    except Exception as first_error:
+        logger.warning(
+            "STEP %s.parse.retry reason=invalid_json response=%r error=%s",
+            stage,
+            content,
+            first_error,
+        )
+        retry_messages = [
+            *messages,
+            {
+                "role": "user",
+                "content": (
+                    "Your previous response was not valid JSON. Return only one valid JSON object "
+                    "matching the requested fields. Do not use markdown fences, commentary, or the "
+                    "invalid escape \\'; apostrophes must appear unescaped."
+                ),
+            },
+        ]
+        retry_response = litellm.completion(
+            model=model,
+            messages=retry_messages,
+            response_format=response_format,
+        )
+        return _parse_model_json(
+            retry_response.choices[0].message.content,
+            model_type,
+        )
+
+
 def _invoke_pdf_summary(
     model_name: str, *, instruction: str, text: str, stage: str, item_index: int, item_total: int, label: str
 ) -> str:
@@ -430,7 +500,7 @@ reader relevance, and the strength of the papers' conclusions. Do not confuse
 paper count with real-world popularity. Prefer a useful, explainable topic over
 clickbait. Mention uncertainty when the evidence is thin.
 
-Return a JSON object with the following fields:
+Return one strict JSON object with the following fields:
 - topic: string (one focused research topic, not a broad category)
 - popularity_score: integer (0-100)
 - recency_score: integer (0-100)
@@ -441,6 +511,7 @@ Return a JSON object with the following fields:
 - selected_paper_index: integer (1-based index of the strongest source paper)
 
 The topic must be meaningfully different from every topic in the RECENTLY POSTED TOPICS list.
+Use valid JSON syntax: do not use markdown fences, commentary, or `\\'` to escape apostrophes.
 
 RECENTLY POSTED TOPICS (last 7 days):
 {exclusion}
@@ -450,12 +521,14 @@ PAPER RECORDS:
     logger.info("STEP finalize_topic.model.invoke prompt_chars=%d", len(prompt))
     started_at = perf_counter()
     try:
-        response = litellm.completion(
+        result = _completion_with_json_retry(
             model=model_name,
             messages=[
                 {"role": "system", "content": "You are a research editor. Return only valid JSON."},
                 {"role": "user", "content": prompt},
             ],
+            model_type=TopicDecision,
+            stage="finalize_topic",
         )
     except Exception:
         logger.exception(
@@ -463,12 +536,6 @@ PAPER RECORDS:
             perf_counter() - started_at, len(prompt),
         )
         raise
-    content = response.choices[0].message.content
-    try:
-        result = TopicDecision.model_validate_json(_extract_json(content))
-    except Exception as e:
-        logger.error("STEP finalize_topic.parse.error response=%r", content)
-        raise ValueError(f"Failed to parse model response as TopicDecision: {e}")
     logger.info(
         "STEP finalize_topic.done elapsed_seconds=%.2f topic=%r selected_paper_index=%s",
         perf_counter() - started_at,
@@ -527,7 +594,7 @@ complete PDF. You may use the
 other paper metadata for context, but do not turn a summary into a claim that
 the primary paper does not support.
 
-Return a JSON object with the following fields:
+Return one strict JSON object with the following fields:
 - hook: string
 - audience_value: string
 - key_points: array of strings (3-5 items)
@@ -545,7 +612,7 @@ paper title, author names, journal or venue name, DOI, URL, hyperlink, citation,
 footnote, bracketed reference, or phrases such as "according to this paper".
 Do not mention this prompt, extraction, or missing information. Avoid hype,
 unsupported statistics, fabricated citations, and claims not present in the
-research.
+research. Do not use markdown fences, commentary, or `\\'` to escape apostrophes.
 
 SELECTED TOPIC:
 {topic.model_dump_json(indent=2)}
@@ -567,12 +634,14 @@ PDF URL: {selected_paper.get('pdf_url') or 'Not available'}
     )
     started_at = perf_counter()
     try:
-        response = litellm.completion(
+        result = _completion_with_json_retry(
             model=model_name,
             messages=[
                 {"role": "system", "content": "You are a LinkedIn technical writer. Return only valid JSON."},
                 {"role": "user", "content": prompt},
             ],
+            model_type=LinkedInPostPlan,
+            stage="create_post_plan",
         )
     except Exception:
         logger.exception(
@@ -580,12 +649,6 @@ PDF URL: {selected_paper.get('pdf_url') or 'Not available'}
             perf_counter() - started_at, len(prompt),
         )
         raise
-    content = response.choices[0].message.content
-    try:
-        result = LinkedInPostPlan.model_validate_json(_extract_json(content))
-    except Exception as e:
-        logger.error("STEP create_post_plan.parse.error response=%r", content)
-        raise ValueError(f"Failed to parse model response as LinkedInPostPlan: {e}")
     logger.info(
         "STEP create_post_plan.model.done elapsed_seconds=%.2f result_type=%s full_post_chars=%d",
         perf_counter() - started_at,
